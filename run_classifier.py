@@ -30,7 +30,7 @@ class StanfordAPIError(Exception):
 class RunClassifier:
     """
     Client for Stanford AI Gateway API calls with context-aware chunking
-    
+
     Builds output incrementally, chunk by chunk, with preceding runs providing
     rich context including their already-determined classifications.
     """
@@ -38,7 +38,7 @@ class RunClassifier:
     def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-7-sonnet"):
         """
         Initialize the API client
-        
+
         Args:
             api_key: Stanford API key (defaults to STANFORD_API_KEY env var)
             model: Model to use for analysis
@@ -73,7 +73,13 @@ class RunClassifier:
         # Setup logging
         self.logger = logging.getLogger(__name__)
 
-    def _make_api_call(self, prompt: str, max_retries: int = 3) -> Dict[str, Any]:
+        # Token usage tracking
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_tokens = 0
+        self.chunk_token_history = []
+
+    def _make_api_call(self, prompt: str, max_retries: int = 3) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Make API call to Stanford AI Gateway with robust error handling"""
         payload = {
             "model": self.model,
@@ -93,7 +99,9 @@ class RunClassifier:
                 )
 
                 if response.status_code == 200:
-                    return response.json()
+                    response_data = response.json()
+                    usage = response_data.get('usage', {})
+                    return response_data, usage
                 else:
                     error_msg = f"API call failed with status {response.status_code}"
                     if response.text:
@@ -132,12 +140,12 @@ class RunClassifier:
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
         if json_match:
             return json_match.group(1)
-        
+
         # Try to find standalone JSON object
         json_match = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', content, re.DOTALL)
         if json_match:
             return json_match.group(1)
-            
+
         return content
 
     def _validate_chunk_classifications(self, json_str: str) -> Dict[str, Any]:
@@ -156,20 +164,20 @@ class RunClassifier:
         # Validate classifications array
         if not isinstance(data["classifications"], list):
             raise StanfordAPIError("Classifications must be an array")
-            
+
         # Check each classification entry
         valid_classifications = {"sample_run", "calibration_run", "alignment_run", "test_run", "commissioning_run", "unknown_run"}
         valid_confidence = {"high", "medium", "low"}
-        
+
         for i, classification in enumerate(data["classifications"]):
             run_fields = ["run_number", "classification", "confidence", "key_evidence"]
             missing_run_fields = [field for field in run_fields if field not in classification]
             if missing_run_fields:
                 raise StanfordAPIError(f"Run {i+1} missing required fields: {missing_run_fields}")
-                
+
             if classification["classification"] not in valid_classifications:
                 raise StanfordAPIError(f"Run {classification['run_number']} has invalid classification: {classification['classification']}")
-                
+
             if classification["confidence"] not in valid_confidence:
                 raise StanfordAPIError(f"Run {classification['run_number']} has invalid confidence: {classification['confidence']}")
 
@@ -178,7 +186,7 @@ class RunClassifier:
     def _parse_experiment_file(self, markdown_content: str) -> Tuple[str, int, List[Dict]]:
         """
         Parse experiment file to extract experiment ID, run count, and run data
-        
+
         Returns:
             Tuple of (experiment_id, total_runs, run_data_list)
         """
@@ -187,34 +195,34 @@ class RunClassifier:
         if not exp_match:
             raise StanfordAPIError("Could not extract experiment ID from file")
         experiment_id = exp_match.group(1)
-        
+
         # Parse individual runs with their data
         run_pattern = r'### Run (\d+)\n(.*?)(?=### Run \d+|\Z)'
         runs = re.findall(run_pattern, markdown_content, re.DOTALL)
-        
+
         run_data = []
         for run_num_str, run_content in runs:
             run_data.append({
                 'run_number': int(run_num_str),
                 'content': f"### Run {run_num_str}\n{run_content.strip()}"
             })
-        
+
         return experiment_id, len(run_data), run_data
 
     def _read_previous_classifications(self, output_file: Path, num_context: int) -> List[Dict]:
         """
         Read the last N classifications from the output file
-        
+
         Args:
             output_file: Path to the output file
             num_context: Number of previous classifications to read
-            
+
         Returns:
             List of previous classification dictionaries
         """
         if not output_file.exists():
             return []
-            
+
         try:
             with open(output_file, 'r') as f:
                 data = json.load(f)
@@ -226,28 +234,28 @@ class RunClassifier:
     def _create_context_content(self, context_classifications: List[Dict], raw_run_data: List[Dict]) -> str:
         """
         Create context content that includes previous classifications
-        
+
         Args:
             context_classifications: Previous classification results
             raw_run_data: Raw run data for context runs
-            
+
         Returns:
             Formatted context content with classifications included
         """
         if not context_classifications:
             return ""
-            
+
         context_content = []
-        
+
         # Create a map of run_number to classification for quick lookup
         classification_map = {c['run_number']: c for c in context_classifications}
-        
+
         for run_data in raw_run_data:
             run_num = run_data['run_number']
             if run_num in classification_map:
                 # Include the original content plus the classification
                 classification = classification_map[run_num]
-                
+
                 # Replace __ANSWER__ placeholders with actual classifications
                 content = run_data['content']
                 content = content.replace(
@@ -262,24 +270,24 @@ class RunClassifier:
                     "**Key evidence**: __ANSWER__",
                     f"**Key evidence**: {classification['key_evidence']}"
                 )
-                
+
                 # Add context marker
                 content = content.replace(
                     f"### Run {run_num}",
                     f"### Run {run_num} (CONTEXT - already classified)"
                 )
-                
+
                 context_content.append(content)
-        
+
         return "\n\n".join(context_content)
 
     def _create_prompt(self, experiment_id: str, context_content: str, 
                       new_runs: List[Dict], chunk_num: int, total_chunks: int) -> str:
         """Create classification prompt with rich context"""
-        
+
         # Build new runs content (with __ANSWER__ placeholders)
         new_runs_content = "\n\n".join([run['content'] for run in new_runs])
-        
+
         # Combine context and new content
         if context_content:
             full_content = f"{context_content}\n\n{new_runs_content}"
@@ -418,30 +426,42 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
             "processing_info": {
                 "processing_mode": "chunked_classification",
                 "started_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-                "chunks_completed": 0
+                "chunks_completed": 0,
+                "token_usage": {
+                    "total_tokens": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "per_chunk_tokens": []
+                }
             },
             "classifications": []
         }
-        
+
         with open(output_file, 'w') as f:
             json.dump(initial_data, f, indent=2)
 
     def _append_classifications(self, output_file: Path, new_classifications: List[Dict], 
-                              chunk_num: int, total_chunks: int) -> None:
+                              chunk_num: int, total_chunks: int, chunk_tokens: int = 0) -> None:
         """Append new classifications to the output file"""
         # Read current data
         with open(output_file, 'r') as f:
             data = json.load(f)
-        
+
         # Append new classifications
         data["classifications"].extend(new_classifications)
         data["total_runs"] = len(data["classifications"])
         data["processing_info"]["chunks_completed"] = chunk_num
         data["processing_info"]["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        
+
+        # Update token usage
+        data["processing_info"]["token_usage"]["total_tokens"] = self.total_tokens
+        data["processing_info"]["token_usage"]["prompt_tokens"] = self.total_prompt_tokens
+        data["processing_info"]["token_usage"]["completion_tokens"] = self.total_completion_tokens
+        data["processing_info"]["token_usage"]["per_chunk_tokens"].append(chunk_tokens)
+
         if chunk_num == total_chunks:
             data["processing_info"]["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        
+
         # Write back to file
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
@@ -452,7 +472,7 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
                      resume_file: Optional[Path] = None) -> Dict[str, Any]:
         """
         Classify runs using chunking with context from preceding runs
-        
+
         Args:
             markdown_content: Markdown-formatted experiment data
             chunk_size: Number of runs to classify per chunk
@@ -460,24 +480,24 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
             rate_limit: Delay between API calls in seconds
             output_file: Path for output
             resume_file: Path for resume data (if enabled)
-            
+
         Returns:
             Final classification results dictionary
         """
         # Parse experiment
         experiment_id, total_runs, run_data = self._parse_experiment_file(markdown_content)
-        
+
         self.logger.info(f"Processing experiment {experiment_id} with {total_runs} runs")
         self.logger.info(f"Chunking: {chunk_size} runs per chunk, {context_runs} preceding runs for context")
-        
+
         # Calculate chunks
         total_chunks = (total_runs + chunk_size - 1) // chunk_size  # Ceiling division
         self.logger.info(f"Will process {total_chunks} chunks")
-        
+
         # Initialize output file
         if not output_file:
             output_file = Path(f"{experiment_id}_classifications.json")
-        
+
         # Check for resume capability
         start_chunk = 1
         if resume_file and resume_file.exists():
@@ -488,52 +508,59 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
                     self.logger.info(f"Resuming from chunk {start_chunk}/{total_chunks}")
             except Exception as e:
                 self.logger.warning(f"Could not load resume data: {e}, starting from beginning")
-        
+
         if start_chunk == 1:
             self._initialize_output_file(output_file, experiment_id)
-        
+
         # Process chunks
         with tqdm(total=total_chunks, initial=start_chunk-1, desc="Processing chunks") as pbar:
             for chunk_num in range(start_chunk, total_chunks + 1):
                 chunk_start_time = time.time()
-                
+
                 try:
                     # Calculate chunk boundaries
                     run_start_idx = (chunk_num - 1) * chunk_size
                     run_end_idx = min(run_start_idx + chunk_size, total_runs)
-                    
+
                     # Get new runs to classify
                     new_runs = run_data[run_start_idx:run_end_idx]
-                    
+
                     # Get context runs (preceding runs with their classifications)
                     context_content = ""
                     if context_runs > 0 and chunk_num > 1:
                         # Get previous classifications for context
                         previous_classifications = self._read_previous_classifications(output_file, context_runs)
-                        
+
                         # Get corresponding raw run data for context
                         context_start_idx = max(0, run_start_idx - context_runs)
                         context_run_data = run_data[context_start_idx:run_start_idx]
-                        
+
                         context_content = self._create_context_content(previous_classifications, context_run_data)
-                    
+
                     # Create prompt
                     prompt = self._create_prompt(
                         experiment_id, context_content, new_runs, chunk_num, total_chunks
                     )
-                    
+
                     # Make API call
                     self.logger.debug(f"Processing chunk {chunk_num}/{total_chunks}: runs {new_runs[0]['run_number']}-{new_runs[-1]['run_number']}")
-                    response = self._make_api_call(prompt)
-                    
+                    response, usage = self._make_api_call(prompt)
+
+                    # Track token usage
+                    chunk_tokens = usage.get('total_tokens', 0)
+                    self.total_tokens += chunk_tokens
+                    self.total_prompt_tokens += usage.get('prompt_tokens', 0)
+                    self.total_completion_tokens += usage.get('completion_tokens', 0)
+                    self.chunk_token_history.append(chunk_tokens)
+
                     # Extract and validate
                     content = self._validate_response(response)
                     json_content = self._extract_json_from_response(content)
                     result = self._validate_chunk_classifications(json_content)
-                    
+
                     # Append to output
-                    self._append_classifications(output_file, result["classifications"], chunk_num, total_chunks)
-                    
+                    self._append_classifications(output_file, result["classifications"], chunk_num, total_chunks, chunk_tokens)
+
                     # Save resume data
                     if resume_file:
                         resume_data = {
@@ -544,33 +571,33 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
                         }
                         with open(resume_file, 'w') as f:
                             json.dump(resume_data, f, indent=2)
-                    
+
                     # User feedback
                     chunk_time = time.time() - chunk_start_time
                     classified_count = len(result["classifications"])
                     start_run = new_runs[0]['run_number']
                     end_run = new_runs[-1]['run_number']
-                    
-                    print(f"✓ Chunk {chunk_num}/{total_chunks} complete: classified runs {start_run}-{end_run} ({classified_count} runs) in {chunk_time:.1f}s", file=sys.stderr)
-                    
+
+                    print(f"✓ Chunk {chunk_num}/{total_chunks} complete: classified runs {start_run}-{end_run} ({classified_count} runs, {chunk_tokens:,} tokens) in {chunk_time:.1f}s", file=sys.stderr)
+
                     # Rate limiting
                     if rate_limit > 0 and chunk_num < total_chunks:
                         time.sleep(rate_limit)
-                        
+
                     pbar.update(1)
-                    
+
                 except Exception as e:
                     self.logger.error(f"Error processing chunk {chunk_num}: {e}")
                     raise StanfordAPIError(f"Chunk {chunk_num} failed: {e}")
-        
+
         # Load final result
         with open(output_file, 'r') as f:
             final_result = json.load(f)
-        
+
         # Clean up resume file if successful
         if resume_file and resume_file.exists():
             resume_file.unlink()
-            
+
         self.logger.info(f"Classification complete: {final_result['total_runs']} runs classified")
         return final_result
 
@@ -578,7 +605,7 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
 def setup_logging(verbose: bool = False, debug: bool = False) -> None:
     """Setup logging configuration"""
     level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
-    
+
     logging.basicConfig(
         level=level,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -597,32 +624,32 @@ def main():
 Examples:
   # Basic usage
   python run_classifier.py experiment.md
-  
+
   # Custom chunk size and context
   python run_classifier.py experiment.md --chunk-size 20 --context-runs 3
-  
+
   # With resume capability
   python run_classifier.py experiment.md --resume --rate-limit 2.0
-  
+
   # Verbose output with custom settings
   python run_classifier.py experiment.md -v --chunk-size 25 --context-runs 5
         """
     )
-    
+
     # Required arguments
     parser.add_argument('input_file', type=Path,
                        help='Input markdown file with experiment data')
-    
+
     # Output options
     parser.add_argument('-o', '--output', type=Path,
                        help='Output JSON file (default: auto-generated from input)')
-    
+
     # Chunking options
     parser.add_argument('--chunk-size', type=int, default=30,
                        help='Number of runs to classify per chunk (default: 30)')
     parser.add_argument('--context-runs', type=int, default=5,
                        help='Number of preceding runs to include for context (default: 5)')
-    
+
     # API options
     parser.add_argument('--api-key', 
                        help='Stanford API key (default: STANFORD_API_KEY env var)')
@@ -630,50 +657,50 @@ Examples:
                        help='Model to use (default: claude-3-7-sonnet)')
     parser.add_argument('--rate-limit', type=float, default=1.0,
                        help='Delay between API calls in seconds (default: 1.0)')
-    
+
     # Resume options
     parser.add_argument('--resume', action='store_true',
                        help='Enable resume capability for interrupted processing')
     parser.add_argument('--resume-file', type=Path,
                        help='File for storing resume data (default: auto-generated)')
-    
+
     # Logging options
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose output')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output')
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging
     setup_logging(args.verbose, args.debug)
     logger = logging.getLogger(__name__)
-    
+
     try:
         # Validate input file
         if not args.input_file.exists():
             logger.error(f"Input file not found: {args.input_file}")
             sys.exit(1)
-        
+
         # Generate output filename if not provided
         if not args.output:
             base_name = args.input_file.stem
             if base_name.endswith('_enrichment'):
                 base_name = base_name[:-11]
             args.output = Path(f"{base_name}_classifications.json")
-        
+
         # Generate resume filename if resume enabled but not specified
         if args.resume and not args.resume_file:
             args.resume_file = args.output.with_suffix('.resume.json')
-        
+
         # Read input file
         logger.info(f"Reading input file: {args.input_file}")
         with open(args.input_file, 'r') as f:
             markdown_content = f.read()
-        
+
         # Create classifier
         classifier = RunClassifier(api_key=args.api_key, model=args.model)
-        
+
         # Process with chunking
         logger.info("Starting classification...")
         result = classifier.classify_runs(
@@ -684,29 +711,35 @@ Examples:
             output_file=args.output,
             resume_file=args.resume_file if args.resume else None
         )
-        
+
         print(f"\n✓ Classification complete!", file=sys.stderr)
         print(f"✓ Experiment: {result['experiment_id']}", file=sys.stderr)
         print(f"✓ Total runs: {result['total_runs']}", file=sys.stderr)
         print(f"✓ Chunks processed: {result['processing_info']['chunks_completed']}", file=sys.stderr)
         print(f"✓ Output saved to: {args.output}", file=sys.stderr)
-        
+
         # Print classification breakdown
         classification_counts = {}
         for classification in result['classifications']:
             cat = classification['classification']
             classification_counts[cat] = classification_counts.get(cat, 0) + 1
-            
+
         print("✓ Classification breakdown:", file=sys.stderr)
         for cat, count in sorted(classification_counts.items()):
             print(f"  - {cat}: {count}", file=sys.stderr)
+
+        # Token usage summary
+        total_chunks = result['processing_info']['chunks_completed']
+        avg_tokens = classifier.total_tokens // total_chunks if total_chunks > 0 else 0
+        print(f"✓ Token usage: {classifier.total_tokens:,} total (avg {avg_tokens:,} per chunk)", file=sys.stderr)
+        print(f"✓ Token breakdown: {classifier.total_prompt_tokens:,} prompt + {classifier.total_completion_tokens:,} completion", file=sys.stderr)
 
     except KeyboardInterrupt:
         logger.info("Processing interrupted by user")
         if args.resume and args.resume_file and args.resume_file.exists():
             logger.info(f"Resume data saved to: {args.resume_file}")
         sys.exit(1)
-        
+
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)

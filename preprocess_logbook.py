@@ -16,16 +16,17 @@ import html
 import argparse
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 class LogbookPreprocessor:
     """Preprocesses LCLS experiment logbook data for LLM enrichment."""
 
-    def __init__(self, db_path: str):
-        """Initialize with database path."""
+    def __init__(self, db_path: str, filter_patterns: Optional[List[str]] = None):
+        """Initialize with database path and optional filter patterns."""
         self.db_path = db_path
         self.conn = None
+        self.filter_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in (filter_patterns or [])]
 
     def connect(self):
         """Connect to SQLite database."""
@@ -120,6 +121,17 @@ class LogbookPreprocessor:
                 content = "[Long technical log - content truncated]"
 
         return content
+
+    def should_filter_entry(self, content: str) -> bool:
+        """Check if an entry should be filtered out based on configured patterns."""
+        if not self.filter_patterns or not content:
+            return False
+
+        # Check if content matches any filter pattern
+        for pattern in self.filter_patterns:
+            if pattern.search(content.strip()):
+                return True
+        return False
 
     def _convert_html_tables(self, content: str) -> str:
         """Convert HTML tables to markdown-style format."""
@@ -234,13 +246,23 @@ class LogbookPreprocessor:
         context += f"**Total entries**: {len(entries)} ({len(unique_entries)} unique)\n"
         context += "**Activities**:\n"
 
+        filtered_count = 0
         for entry in unique_entries:
             cleaned_content = self.clean_html_content(entry['content'])
             if cleaned_content and len(cleaned_content) > 3:
+                # Check if this entry should be filtered out
+                if self.should_filter_entry(cleaned_content):
+                    filtered_count += 1
+                    continue
+
                 # Add bullet point and truncate if still too long
                 if len(cleaned_content) > 200:
                     cleaned_content = cleaned_content[:200] + "..."
                 context += f"- {cleaned_content}\n"
+
+        # Add filtering summary if entries were filtered
+        if filtered_count > 0:
+            context += f"- [Filtered out {filtered_count} automated log entries]\n"
 
         # Add enrichment template fields for LLM processing
         context += "\n**Run classification**: __ANSWER__\n"
@@ -286,10 +308,29 @@ def main():
     parser.add_argument('--database', default='2025_0813_2257.db', help='Database file path')
     parser.add_argument('--output', help='Output file path (default: stdout)')
 
+    # Filtering options
+    parser.add_argument('--filter-pattern', type=str, action='append', help='Single regex pattern to filter out (can be used multiple times)')
+    parser.add_argument('--filter-patterns', type=str, help='File containing custom regex patterns to filter out (one per line)')
+
     args = parser.parse_args()
 
-    # Initialize preprocessor
-    preprocessor = LogbookPreprocessor(args.database)
+    # Initialize preprocessor with filtering options
+    filter_patterns = []
+
+    # Collect patterns from single --filter-pattern arguments
+    if args.filter_pattern:
+        filter_patterns.extend(args.filter_pattern)
+
+    # Collect patterns from --filter-patterns file
+    if args.filter_patterns:
+        try:
+            with open(args.filter_patterns, 'r') as f:
+                file_patterns = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+                filter_patterns.extend(file_patterns)
+        except FileNotFoundError:
+            print(f"Warning: Filter patterns file '{args.filter_patterns}' not found. Skipping file-based patterns.")
+
+    preprocessor = LogbookPreprocessor(args.database, filter_patterns=filter_patterns)
 
     try:
         preprocessor.connect()

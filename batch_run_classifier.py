@@ -23,22 +23,22 @@ def main():
 Examples:
   # Process all experiments from CSV
   python batch_run_classifier.py experiments.csv
-  
+
   # Process crystallography experiments (backward compatibility)
   python batch_run_classifier.py crystallography.csv --output-dir batch_crystallography_results
-  
+
   # Process limited number with custom directories
   python batch_run_classifier.py protein_experiments.csv --output-dir protein_results --max-experiments 20
-  
+
   # Force overwrite existing results
   python batch_run_classifier.py my_experiments.csv --force
         """
     )
-    
+
     # Required arguments
     parser.add_argument('csv_file', type=Path,
                        help='CSV file containing experiment IDs in the first column')
-    
+
     # Optional arguments
     parser.add_argument('--output-dir', default='batch_results',
                        help='Directory to save classification results (default: batch_results)')
@@ -48,9 +48,9 @@ Examples:
                        help='Maximum number of experiments to process (default: all)')
     parser.add_argument('--force', action='store_true',
                        help='Overwrite existing output files')
-    
+
     args = parser.parse_args()
-    
+
     print("🔬 LCLS Batch Classifier")
     print("=" * 50)
 
@@ -58,7 +58,7 @@ Examples:
     if not args.csv_file.exists():
         print(f"❌ Error: CSV file not found: {args.csv_file}")
         sys.exit(1)
-    
+
     # Create output directory if it doesn't exist
     output_path = Path(args.output_dir)
     output_path.mkdir(exist_ok=True)
@@ -100,7 +100,7 @@ Examples:
             print(f"  ⚠️  Skipped - enrichment file not found: {enrichment_file}")
             skipped_count += 1
             continue
-        
+
         # Check if output already exists (skip unless --force)
         if output_file.exists() and not args.force:
             print(f"  ⚠️  Skipped - output already exists: {output_file} (use --force to overwrite)")
@@ -148,7 +148,7 @@ Examples:
         print(f"   ls {args.output_dir}/*.json")
         print(f"   python token_summary.py {args.output_dir}/*.json --detailed --cost")
         print(f"   # Each file contains token usage data in processing_info.token_usage")
-        
+
         print(f"\n🔄 To create fully enriched documents:")
         print(f"   python batch_fill_enrichment.py --classification-dir {args.output_dir}")
 

@@ -49,11 +49,3 @@ python batch_run_classifier.py crystallography.csv
 # Fill placeholders
 python batch_fill_enrichment.py
 ```
-
-## 📁 Files to Include in Git
-
-**Core scripts**: `preprocess_logbook.py`, `batch_preprocess_logbook.py`, `run_classifier.py`, `batch_run_classifier.py`, `fill_enrichment.py`, `batch_fill_enrichment.py`, `token_summary.py`
-
-**Config**: `crystallography.csv`
-
-**Exclude**: Generated outputs (`batch_*_results/`, `fully_enriched_experiments/`, `processed_experiments/`)

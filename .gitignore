@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Generated data and results
+batch_*_results/
+fully_enriched_experiments/
+processed_experiments/
+all_experiments/
+
+# Database files
+*.db
+
+# Generated outputs
+*_classifications.json
+*_classified.md
+*_processed.md
+*.csv
+enriched_elogs_*.csv
+
+# Temporary and test files
+test*.md
+test*.json
+test_batch/
+
+# Logs and analysis
+token_analysis_report.md
+validations/

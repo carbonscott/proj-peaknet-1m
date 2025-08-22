@@ -378,21 +378,46 @@ Classify each run into exactly ONE of these categories based on its PRIMARY purp
 ### 6. `unknown_run`
 **Definition**: Runs with insufficient, unclear, or contradictory information to classify confidently.
 
-## Confidence Guidelines
+## Classification Strategy
 
-- **high**: Clear, unambiguous indicators with multiple supporting evidence
-- **medium**: Some clear indicators but with minor ambiguity, mixed activities but one primary purpose apparent
-- **low**: Limited or unclear evidence, contradictory activities, classification based on weak indicators
-
-## Classification Priority Rules
-
-When a run contains multiple types of activities, classify based on the PRIMARY purpose:
-
+### Priority Rules
+When a run contains multiple activities, classify based on PRIMARY purpose:
 1. **Sample measurement** takes priority over setup activities
-2. **Calibration** takes priority over routine maintenance
+2. **Calibration** takes priority over routine maintenance  
 3. **Alignment** takes priority over general testing
 4. **Commissioning** applies only to dedicated commissioning runs
-5. **Use `unknown_run`** only when truly unclear
+
+### Contextual Analysis and Workflow Logic
+
+Use preceding context runs as an **active validation tool** for all classifications:
+
+**Core Workflow Principles:**
+- **Setup → Measurement**: Calibrations/alignments precede data collection
+- **Sequential Logic**: Similar runs are often grouped in campaigns
+- **Problem Resolution**: Equipment issues trigger test/troubleshooting sequences
+- **Session Continuity**: Activities within experimental sessions are logically connected
+
+**For Rich Logbook Entries:**
+- **Validate workflow**: Does this classification fit the experimental sequence?
+- **Disambiguate**: Use context when entries are ambiguous (e.g., "detector adjustments" after calibration runs → likely `calibration_run`)
+- **Verify logic**: Sample runs after troubleshooting may actually be `test_run` to verify fixes
+
+**For Missing/Minimal Entries:**
+- **Pattern inference**: 2+ consecutive runs with same classification → likely continuation
+- **Sequence logic**: Consider natural progressions (calibration sequences, sample campaigns, alignment procedures)
+- **Break point detection**: Don't infer when time gaps, condition changes, or mixed context exist
+
+**Classification Examples:**
+- Rich entry + consistent context → `sample_run`, **high confidence**
+- "Detector adjustments" + calibration context → `calibration_run`, **medium confidence**
+- "No logbook entries" + sample run pattern → `sample_run`, **medium confidence**
+
+### Confidence Guidelines
+- **high**: Clear indicators + supportive context + logical workflow
+- **medium**: Some clear indicators, minor ambiguity, or pattern-based inference
+- **low**: Limited evidence, contradictory activities, or weak context
+
+**Use `unknown_run` only when no discernible pattern exists despite available context.**
 
 ## Scientific Domain Knowledge
 

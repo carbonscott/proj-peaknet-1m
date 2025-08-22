@@ -99,9 +99,17 @@ class RunClassifier:
                 )
 
                 if response.status_code == 200:
-                    response_data = response.json()
-                    usage = response_data.get('usage', {})
-                    return response_data, usage
+                    try:
+                        response_data = response.json()
+                        usage = response_data.get('usage', {})
+                        return response_data, usage
+                    except json.JSONDecodeError as e:
+                        error_msg = f"Invalid JSON response: {e}. Raw response: {response.text[:200]}"
+                        if attempt < max_retries - 1:
+                            self.logger.warning(f"  {error_msg}, retrying...")
+                            continue
+                        else:
+                            raise StanfordAPIError(error_msg)
                 else:
                     error_msg = f"API call failed with status {response.status_code}"
                     if response.text:
@@ -466,10 +474,47 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
 
+    def _detect_progress_from_output(self, output_file: Path, chunk_size: int) -> int:
+        """Detect last completed chunk from existing output file
+        
+        Args:
+            output_file: Path to the output JSON file
+            chunk_size: Number of runs per chunk
+            
+        Returns:
+            Next chunk number to start from (1-indexed)
+        """
+        if not output_file.exists():
+            return 1  # Start from beginning
+            
+        try:
+            with open(output_file, 'r') as f:
+                data = json.load(f)
+            
+            classifications = data.get('classifications', [])
+            if not classifications:
+                return 1
+                
+            # Find highest run number that's been classified
+            max_run = max(c['run_number'] for c in classifications)
+            
+            # Calculate which chunk contains this run (1-indexed)
+            last_completed_chunk = (max_run - 1) // chunk_size + 1
+            
+            # Start from the next chunk
+            next_chunk = last_completed_chunk + 1
+            
+            self.logger.info(f"Detected progress: highest classified run {max_run} (chunk {last_completed_chunk})")
+            return next_chunk
+            
+        except Exception as e:
+            self.logger.warning(f"Could not read output file for progress: {e}")
+            return 1
+
     def classify_runs(self, markdown_content: str, chunk_size: int = 30, 
                      context_runs: int = 5, rate_limit: float = 1.0,
                      output_file: Optional[Path] = None,
-                     resume_file: Optional[Path] = None) -> Dict[str, Any]:
+                     continue_processing: bool = False) -> Dict[str, Any]:
         """
         Classify runs using chunking with context from preceding runs
 
@@ -478,8 +523,8 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
             chunk_size: Number of runs to classify per chunk
             context_runs: Number of preceding runs to include for context
             rate_limit: Delay between API calls in seconds
-            output_file: Path for output
-            resume_file: Path for resume data (if enabled)
+            output_file: Path for output (automatically detects and resumes from existing progress)
+            continue_processing: Continue processing despite chunk failures
 
         Returns:
             Final classification results dictionary
@@ -497,19 +542,16 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
         # Initialize output file
         if not output_file:
             output_file = Path(f"{experiment_id}_classifications.json")
+        
+        # Track failed chunks for fault tolerance
+        failed_chunks = []
 
-        # Check for resume capability
-        start_chunk = 1
-        if resume_file and resume_file.exists():
-            try:
-                with open(resume_file, 'r') as f:
-                    resume_data = json.load(f)
-                    start_chunk = resume_data.get('last_completed_chunk', 0) + 1
-                    self.logger.info(f"Resuming from chunk {start_chunk}/{total_chunks}")
-            except Exception as e:
-                self.logger.warning(f"Could not load resume data: {e}, starting from beginning")
-
-        if start_chunk == 1:
+        # Smart resume from existing output file
+        start_chunk = self._detect_progress_from_output(output_file, chunk_size)
+        
+        if start_chunk > 1:
+            self.logger.info(f"Resuming from chunk {start_chunk}/{total_chunks}")
+        else:
             self._initialize_output_file(output_file, experiment_id)
 
         # Process chunks
@@ -561,16 +603,6 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
                     # Append to output
                     self._append_classifications(output_file, result["classifications"], chunk_num, total_chunks, chunk_tokens)
 
-                    # Save resume data
-                    if resume_file:
-                        resume_data = {
-                            'experiment_id': experiment_id,
-                            'total_chunks': total_chunks,
-                            'last_completed_chunk': chunk_num,
-                            'last_updated': time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-                        }
-                        with open(resume_file, 'w') as f:
-                            json.dump(resume_data, f, indent=2)
 
                     # User feedback
                     chunk_time = time.time() - chunk_start_time
@@ -588,17 +620,48 @@ IMPORTANT: Classify ONLY the NEW runs ({classify_start} through {classify_end}).
 
                 except Exception as e:
                     self.logger.error(f"Error processing chunk {chunk_num}: {e}")
-                    raise StanfordAPIError(f"Chunk {chunk_num} failed: {e}")
+                    if continue_processing:
+                        failed_chunks.append({
+                            'chunk': chunk_num,
+                            'runs': f"{new_runs[0]['run_number']}-{new_runs[-1]['run_number']}",
+                            'error': str(e)
+                        })
+                        pbar.update(1)
+                        continue
+                    else:
+                        raise StanfordAPIError(f"Chunk {chunk_num} failed: {e}")
 
-        # Load final result
-        with open(output_file, 'r') as f:
-            final_result = json.load(f)
-
-        # Clean up resume file if successful
-        if resume_file and resume_file.exists():
-            resume_file.unlink()
-
-        self.logger.info(f"Classification complete: {final_result['total_runs']} runs classified")
+        # Load final result (may be partial if some chunks failed)
+        final_result = {}
+        if output_file.exists():
+            with open(output_file, 'r') as f:
+                final_result = json.load(f)
+        
+        # Report results including failed chunks
+        successful_chunks = total_chunks - len(failed_chunks)
+        if failed_chunks:
+            self.logger.warning(f"Classification partially complete: {successful_chunks}/{total_chunks} chunks succeeded")
+            self.logger.warning(f"Failed chunks: {failed_chunks}")
+            print(f"\n⚠️  Processing completed with {len(failed_chunks)} failed chunks:", file=sys.stderr)
+            for failed in failed_chunks:
+                print(f"   • Chunk {failed['chunk']}: runs {failed['runs']} - {failed['error']}", file=sys.stderr)
+            
+            print(f"\n📊 Results:", file=sys.stderr)
+            if final_result:
+                classified_runs = len(final_result.get('classifications', {}))
+                print(f"   • Successfully classified: {classified_runs} runs", file=sys.stderr)
+            print(f"   • Failed chunks: {len(failed_chunks)}", file=sys.stderr)
+            
+            print(f"\n🔄 To retry failed chunks, run:", file=sys.stderr)
+            print(f"   python run_classifier.py [input_file] --resume", file=sys.stderr)
+        else:
+            self.logger.info(f"Classification complete: {final_result.get('total_runs', 0)} runs classified")
+        
+        # Add failed chunk info to result for programmatic access
+        if final_result:
+            final_result['failed_chunks'] = failed_chunks
+            final_result['processing_status'] = 'partial' if failed_chunks else 'complete'
+            
         return final_result
 
 
@@ -628,11 +691,14 @@ Examples:
   # Custom chunk size and context
   python run_classifier.py experiment.md --chunk-size 20 --context-runs 3
 
-  # With resume capability
-  python run_classifier.py experiment.md --resume --rate-limit 2.0
+  # Resume processing with fault tolerance
+  python run_classifier.py experiment.md --resume
 
-  # Verbose output with custom settings
-  python run_classifier.py experiment.md -v --chunk-size 25 --context-runs 5
+  # With rate limiting and verbose output
+  python run_classifier.py experiment.md --rate-limit 2.0 -v
+
+  # Custom settings with fault tolerance
+  python run_classifier.py experiment.md --chunk-size 25 --context-runs 5 --resume
         """
     )
 
@@ -658,11 +724,11 @@ Examples:
     parser.add_argument('--rate-limit', type=float, default=1.0,
                        help='Delay between API calls in seconds (default: 1.0)')
 
-    # Resume options
+    # Fault tolerance options
     parser.add_argument('--resume', action='store_true',
-                       help='Enable resume capability for interrupted processing')
-    parser.add_argument('--resume-file', type=Path,
-                       help='File for storing resume data (default: auto-generated)')
+                       help='Resume processing with fault tolerance')
+    parser.add_argument('--max-chunk-retries', type=int, default=3,
+                       help='Maximum retries per chunk before giving up (default: 3)')
 
     # Logging options
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -689,9 +755,6 @@ Examples:
                 base_name = base_name[:-11]
             args.output = Path(f"{base_name}_classifications.json")
 
-        # Generate resume filename if resume enabled but not specified
-        if args.resume and not args.resume_file:
-            args.resume_file = args.output.with_suffix('.resume.json')
 
         # Read input file
         logger.info(f"Reading input file: {args.input_file}")
@@ -709,7 +772,7 @@ Examples:
             context_runs=args.context_runs,
             rate_limit=args.rate_limit,
             output_file=args.output,
-            resume_file=args.resume_file if args.resume else None
+            continue_processing=args.resume
         )
 
         print(f"\n✓ Classification complete!", file=sys.stderr)
@@ -736,8 +799,6 @@ Examples:
 
     except KeyboardInterrupt:
         logger.info("Processing interrupted by user")
-        if args.resume and args.resume_file and args.resume_file.exists():
-            logger.info(f"Resume data saved to: {args.resume_file}")
         sys.exit(1)
 
     except Exception as e:

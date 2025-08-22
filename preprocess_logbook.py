@@ -52,9 +52,7 @@ class LogbookPreprocessor:
         SELECT r.run_number, r.start_time, r.end_time, l.timestamp, l.content, l.author
         FROM Run r 
         LEFT JOIN Logbook l ON r.run_id = l.run_id 
-        WHERE r.experiment_id = ? 
-        AND l.content IS NOT NULL 
-        AND LENGTH(TRIM(l.content)) > 0
+        WHERE r.experiment_id = ?
         ORDER BY r.run_number, l.timestamp
         """
 
@@ -176,7 +174,7 @@ class LogbookPreprocessor:
         duplicate_counts = defaultdict(int)
 
         for entry in entries:
-            content = entry['content'].strip()
+            content = (entry['content'] or '').strip()
 
             # Skip empty content
             if not content:
@@ -239,6 +237,17 @@ class LogbookPreprocessor:
 
         # Deduplicate entries
         unique_entries = self.deduplicate_entries(entries)
+        
+        # Check if this run has any meaningful logbook content
+        has_content = any(
+            self.clean_html_content(entry['content']) and 
+            len(self.clean_html_content(entry['content'])) > 3 
+            for entry in unique_entries
+        )
+        
+        if not has_content:
+            # Run exists but has no meaningful logbook entries
+            return f"### Run {run_number}\n**Duration**: {duration}\n**Status**: No logbook entries\n\n**Run classification**: __ANSWER__\n**Confidence**: __ANSWER__\n**Key evidence**: __ANSWER__\n\n"
 
         # Create context block
         context = f"### Run {run_number}\n"

@@ -118,7 +118,8 @@ Examples:
             cmd = [
                 "python", "fill_enrichment.py",
                 str(enrichment_file),
-                str(classification_file)
+                str(classification_file),
+                "-o", str(output_file)
             ]
 
             print(f"  🚀 Running: {' '.join(cmd)}")
